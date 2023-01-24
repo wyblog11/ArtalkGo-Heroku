@@ -1,15 +1,53 @@
-FROM debian:stable-slim
+### build ArtalkGo
+FROM golang:1.18.1-alpine3.15 as builder
 
-ADD artalk-go.yml /opt/artalk/artalk-go.yml
-ADD run.sh /opt/artalk/run.sh
+WORKDIR /source
 
-RUN apt-get update \
-    && apt-get install wget curl  -y
+# install tools
+RUN set -ex \
+    && apk upgrade \
+    && apk add make git gcc musl-dev nodejs bash npm\
+    && npm install -g pnpm@7.2.1
 
-RUN wget -qO artalk.tar.gz https://github.com/aaro-n/file/blob/master/artalk/artalk-go.tar.gz
-    
-RUN tar -zxvf artalk.tar.gz -C /opt/artalk/
-RUN chmod +x /opt/artalk/artalk-go \
-    && chmod +x /opt/artalk/run.sh
+COPY . ./ArtalkGo
 
-CMD /opt/artalk/run.sh
+# build
+RUN set -ex \
+    && cd ./ArtalkGo \
+    && git fetch --tags -f \
+    && export VERSION=$(git describe --tags --abbrev=0) \
+    && export COMMIT_SHA=$(git rev-parse --short HEAD) \
+    && make all
+
+### build final image
+FROM alpine:3.15
+
+# we set the timezone `Asia/Shanghai` by default, you can be modified
+# by `docker build --build-arg="TZ=Other_Timezone ..."`
+ARG TZ="Asia/Shanghai"
+
+ENV TZ ${TZ}
+
+COPY --from=builder /source/ArtalkGo/bin/artalk-go /artalk-go
+
+RUN apk upgrade \
+    && apk add bash tzdata \
+    && ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime \
+    && echo ${TZ} > /etc/timezone
+
+# add alias
+RUN echo -e '#!/bin/bash\n/artalk-go -w / -c /data/artalk-go.yml "$@"' > /usr/bin/artalk-go \
+    && chmod +x /usr/bin/artalk-go \
+    && cp -p /usr/bin/artalk-go /usr/bin/artalk
+
+VOLUME ["/data"]
+
+COPY docker-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
+
+# expose ArtalkGo default port
+EXPOSE 23366
+
+CMD ["server", "--host", "0.0.0.0", "--port", "23366"]
